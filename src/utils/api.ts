@@ -83,7 +83,7 @@ function sortInstancesByHealth(instances: string[], type: 'piped' | 'invidious')
 }
 
 // ─── Network ────────────────────────────────────────────────────────────────
-async function fetchWithTimeout(url: string, timeout = 8000): Promise<Response> {
+async function fetchWithTimeout(url: string, timeout = 10000): Promise<Response> {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), timeout);
     try {
@@ -110,49 +110,10 @@ function cleanTitle(raw: string): string {
         .trim();
 }
 
-function extractVideoId(item: { id?: string; url?: string; videoId?: string }): string {
-    let vid = item.videoId || item.id || '';
-    if (!vid && item.url) {
-        const m = item.url.match(/[?&]v=([^&]+)/) || item.url.match(/\/([a-zA-Z0-9_-]{11})$/);
-        vid = m ? m[1] : '';
-    }
-    return vid.replace(/^\/watch\?v=/, '').replace(/^\//, '').trim();
-}
-
-// ─── Parallel Race Helper ───────────────────────────────────────────────────
-function raceFirst<T>(
-    tasks: Promise<T>[],
-    isValid: (r: T) => boolean,
-): Promise<T | null> {
-    return new Promise((resolve) => {
-        if (tasks.length === 0) { resolve(null); return; }
-        let done = false;
-        let pending = tasks.length;
-
-        for (const task of tasks) {
-            task
-                .then((result) => {
-                    if (!done) {
-                        if (isValid(result)) {
-                            done = true;
-                            resolve(result);
-                        } else {
-                            pending--;
-                            if (pending === 0) resolve(null);
-                        }
-                    }
-                })
-                .catch(() => {
-                    if (!done) {
-                        pending--;
-                        if (pending === 0) resolve(null);
-                    }
-                });
-        }
-    });
-}
+// helpers kept for backwards compat (used via extractVideoId inline in searchPiped)
 
 // ─── Piped ──────────────────────────────────────────────────────────────────
+// Piped is the 2nd-priority provider (Invidious is first by default)
 const PIPED_INSTANCES = [
     'https://pipedapi.adminforge.de',
     'https://pipedapi.kavin.rocks',
@@ -163,140 +124,115 @@ const PIPED_INSTANCES = [
     'https://piped-api.garudalinux.org',
     'https://pipedapi.mosesm.org',
     'https://pipedapi.rivo.world',
+    'https://pipedapi.tokhmi.xyz',
 ];
 
-async function tryPiped(base: string, encoded: string): Promise<Song[]> {
-    try {
-        const res = await fetchWithTimeout(`${base}/search?q=${encoded}&filter=videos`);
-        if (!res.ok) return [];
-        const data = await res.json();
-        if (!Array.isArray(data?.items) || data.items.length === 0) return [];
-
-        const songs: Song[] = data.items
-            .filter((i: any) => i.url || i.id || i.videoId)
-            .slice(0, 20)
-            .map((i: any): Song => {
-                const videoId = extractVideoId(i);
-                return {
-                    videoId,
-                    title: cleanTitle(i.title),
-                    artist: cleanTitle(i.uploaderName || i.uploader || 'Unknown Artist'),
-                    thumbnail: i.thumbnail || `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`,
-                    duration: typeof i.duration === 'number' ? i.duration : (typeof i.duration === 'string' ? parseInt(i.duration) : 0),
-                };
-            })
-            .filter((s: Song) => s.videoId && s.videoId.length >= 5);
-
-        if (songs.length > 0) {
-            recordSuccess('piped', base);
-        }
-        return songs;
-    } catch {
-        recordFail('piped', base);
-        return [];
-    }
-}
-
 async function searchPiped(query: string): Promise<Song[]> {
-    const encoded = encodeURIComponent(query);
+    // Use reference project's proven sequential approach
     const sorted = sortInstancesByHealth(PIPED_INSTANCES, 'piped');
 
-    // Batch 1: race top 3
-    const batch1 = await raceFirst(
-        sorted.slice(0, 3).map((b) => tryPiped(b, encoded)),
-        (r): r is Song[] => Array.isArray(r) && r.length > 0,
-    );
-    if (batch1) return batch1;
+    for (const instance of sorted) {
+        try {
+            const url = `${instance}/search?q=${encodeURIComponent(query)}&filter=videos`;
+            const res = await fetchWithTimeout(url, 10000);
+            if (!res.ok) {
+                recordFail('piped', instance);
+                continue;
+            }
+            const data = await res.json();
+            if (!data.items || !Array.isArray(data.items) || data.items.length === 0) continue;
 
-    // Batch 2: race next 3
-    const batch2 = await raceFirst(
-        sorted.slice(3, 6).map((b) => tryPiped(b, encoded)),
-        (r): r is Song[] => Array.isArray(r) && r.length > 0,
-    );
-    if (batch2) return batch2;
+            const songs: Song[] = data.items
+                .filter((i: any) => i.url || i.id || i.videoId)
+                .slice(0, 20)
+                .map((i: any): Song => {
+                    // Extract videoId - reference project's approach
+                    let videoId = i.id || '';
+                    if (!videoId && i.url) {
+                        const match = i.url.match(/[?&]v=([^&]+)/);
+                        videoId = match ? match[1] : i.url.split('/').pop() || '';
+                    }
+                    videoId = videoId.replace(/^\/watch\?v=/, '').trim();
+                    return {
+                        videoId,
+                        title: cleanTitle(i.title),
+                        artist: cleanTitle(i.uploaderName || i.uploader || 'Unknown Artist'),
+                        thumbnail: i.thumbnail || `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`,
+                        duration: typeof i.duration === 'number' ? i.duration : 0,
+                    };
+                })
+                .filter((s: Song) => s.videoId && s.videoId.length > 3);
 
-    // Batch 3: sequential remaining
-    for (const base of sorted.slice(6)) {
-        const songs = await tryPiped(base, encoded);
-        if (songs.length > 0) return songs;
+            if (songs.length > 0) {
+                recordSuccess('piped', instance);
+                return songs;
+            }
+        } catch (e) {
+            recordFail('piped', instance);
+            continue;
+        }
     }
-
     return [];
 }
 
 // ─── Invidious ──────────────────────────────────────────────────────────────
+// Invidious works well on both PC and mobile - put most reliable ones first
 const INVIDIOUS_INSTANCES = [
-    'https://inv.nadeko.net',
-    'https://invidious.nerdvpn.de',
     'https://iv.melmac.space',
+    'https://inv.nadeko.net',
     'https://iv.ggtyler.dev',
     'https://invidious.privacyredirect.com',
+    'https://invidious.nerdvpn.de',
     'https://inv.tux.pizza',
     'https://yt.artemislena.eu',
     'https://invidious.perennialte.ch',
     'https://invidious.protokoll-11.de',
+    'https://invidious.fdn.fr',
+    'https://invidious.slipfox.xyz',
+    'https://invidious.io',
 ];
 
-async function tryInvidious(base: string, encoded: string): Promise<Song[]> {
-    try {
-        const res = await fetchWithTimeout(
-            `${base}/api/v1/search?q=${encoded}&type=video`,
-        );
-        if (!res.ok) return [];
-        const data = await res.json();
-        if (!Array.isArray(data) || data.length === 0) return [];
-
-        const songs: Song[] = data
-            .filter((i: any) => i.videoId && i.title)
-            .slice(0, 20)
-            .map((i: any): Song => {
-                const thumb =
-                    i.videoThumbnails?.find((t: any) => t.quality === 'medium')?.url ||
-                    i.videoThumbnails?.[0]?.url ||
-                    `https://i.ytimg.com/vi/${i.videoId}/mqdefault.jpg`;
-                return {
-                    videoId: i.videoId,
-                    title: cleanTitle(i.title),
-                    artist: cleanTitle(i.author || 'Unknown Artist'),
-                    thumbnail: thumb.startsWith('//') ? `https:${thumb}` : thumb,
-                    duration: typeof i.lengthSeconds === 'number' ? i.lengthSeconds : 0,
-                };
-            });
-
-        if (songs.length > 0) {
-            recordSuccess('invidious', base);
-        }
-        return songs;
-    } catch {
-        recordFail('invidious', base);
-        return [];
-    }
-}
-
 async function searchInvidious(query: string): Promise<Song[]> {
-    const encoded = encodeURIComponent(query);
+    // Use reference project's proven sequential approach - each instance tried in order
     const sorted = sortInstancesByHealth(INVIDIOUS_INSTANCES, 'invidious');
 
-    // Batch 1: race top 3
-    const batch1 = await raceFirst(
-        sorted.slice(0, 3).map((b) => tryInvidious(b, encoded)),
-        (r): r is Song[] => Array.isArray(r) && r.length > 0,
-    );
-    if (batch1) return batch1;
+    for (const instance of sorted) {
+        try {
+            const url = `${instance}/api/v1/search?q=${encodeURIComponent(query)}&type=video`;
+            const res = await fetchWithTimeout(url, 10000);
+            if (!res.ok) {
+                recordFail('invidious', instance);
+                continue;
+            }
+            const data = await res.json();
+            if (!Array.isArray(data) || data.length === 0) continue;
 
-    // Batch 2: race next 3
-    const batch2 = await raceFirst(
-        sorted.slice(3, 6).map((b) => tryInvidious(b, encoded)),
-        (r): r is Song[] => Array.isArray(r) && r.length > 0,
-    );
-    if (batch2) return batch2;
+            const songs: Song[] = data
+                .filter((i: any) => i.videoId && i.title)
+                .slice(0, 20)
+                .map((i: any): Song => {
+                    const thumb =
+                        i.videoThumbnails?.find((t: any) => t.quality === 'medium')?.url ||
+                        i.videoThumbnails?.[0]?.url ||
+                        `https://i.ytimg.com/vi/${i.videoId}/mqdefault.jpg`;
+                    return {
+                        videoId: i.videoId,
+                        title: cleanTitle(i.title),
+                        artist: cleanTitle(i.author || 'Unknown Artist'),
+                        thumbnail: thumb.startsWith('//') ? `https:${thumb}` : thumb,
+                        duration: typeof i.lengthSeconds === 'number' ? i.lengthSeconds : 0,
+                    };
+                });
 
-    // Batch 3: sequential remaining
-    for (const base of sorted.slice(6)) {
-        const songs = await tryInvidious(base, encoded);
-        if (songs.length > 0) return songs;
+            if (songs.length > 0) {
+                recordSuccess('invidious', instance);
+                return songs;
+            }
+        } catch (e) {
+            recordFail('invidious', instance);
+            continue;
+        }
     }
-
     return [];
 }
 
@@ -378,21 +314,26 @@ export async function searchSongs(
         return { songs: cached, provider: 'cache' };
     }
 
-    // Build provider order
+    // Build provider order - Invidious first by default (works better on PC & mobile)
     const order: { name: SearchProvider; fn: () => Promise<Song[]> }[] = [];
 
     if (provider === 'youtube' && apiKey) {
+        // YouTube API selected explicitly
         order.push({ name: 'youtube', fn: () => searchYouTube(q, apiKey) });
-        order.push({ name: 'piped', fn: () => searchPiped(q) });
-        order.push({ name: 'invidious', fn: () => searchInvidious(q) });
-    } else if (provider === 'invidious') {
         order.push({ name: 'invidious', fn: () => searchInvidious(q) });
         order.push({ name: 'piped', fn: () => searchPiped(q) });
+    } else if (provider === 'piped') {
+        // Piped selected explicitly
+        order.push({ name: 'piped', fn: () => searchPiped(q) });
+        order.push({ name: 'invidious', fn: () => searchInvidious(q) });
     } else {
-        order.push({ name: 'piped', fn: () => searchPiped(q) });
+        // Default (invidious) or explicit invidious selection
+        // Invidious first - works on both PC and mobile reliably
         order.push({ name: 'invidious', fn: () => searchInvidious(q) });
+        order.push({ name: 'piped', fn: () => searchPiped(q) });
     }
 
+    // YouTube API always as final fallback if key is set
     if (apiKey && provider !== 'youtube') {
         order.push({ name: 'youtube', fn: () => searchYouTube(q, apiKey) });
     }
@@ -409,7 +350,7 @@ export async function searchSongs(
         }
     }
 
-    // No fallback - return empty if all APIs fail
+    // All APIs failed - return empty (no fake results)
     return { songs: [], provider: 'failed' };
 }
 
