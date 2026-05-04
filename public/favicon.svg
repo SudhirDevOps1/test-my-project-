@@ -1,40 +1,114 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
   <defs>
-    <linearGradient id="grad1" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#8b5cf6;stop-opacity:1" />
-      <stop offset="50%" style="stop-color:#a855f7;stop-opacity:1" />
-      <stop offset="100%" style="stop-color:#ec4899;stop-opacity:1" />
+    <style>
+      @keyframes pulse {
+        0%, 100% { opacity: 0.4; transform: scale(1); }
+        50% { opacity: 0.8; transform: scale(1.05); }
+      }
+      @keyframes wave1 {
+        0%, 100% { opacity: 0.3; transform: scale(1); }
+        50% { opacity: 0.7; transform: scale(1.15); }
+      }
+      @keyframes wave2 {
+        0%, 100% { opacity: 0.2; transform: scale(1); }
+        50% { opacity: 0.6; transform: scale(1.25); }
+      }
+      @keyframes rotateSlow {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+      .bg-pulse { animation: pulse 2s ease-in-out infinite; transform-origin: center; }
+      .wave-1 { animation: wave1 1.8s ease-in-out infinite; transform-origin: center; }
+      .wave-2 { animation: wave2 1.8s ease-in-out 0.3s infinite; transform-origin: center; }
+      .spin-star { animation: rotateSlow 12s linear infinite; transform-origin: center; }
+    </style>
+
+    <!-- Rich gradient backgrounds -->
+    <radialGradient id="bgGrad" cx="40%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#c084fc"/>
+      <stop offset="40%" stop-color="#8b5cf6"/>
+      <stop offset="80%" stop-color="#6d28d9"/>
+      <stop offset="100%" stop-color="#4c1d95"/>
+    </radialGradient>
+
+    <radialGradient id="innerGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#f0abfc" stop-opacity="0.6"/>
+      <stop offset="60%" stop-color="#a855f7" stop-opacity="0.2"/>
+      <stop offset="100%" stop-color="#7c3aed" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="outerRing" cx="50%" cy="50%" r="50%">
+      <stop offset="85%" stop-color="#ec4899" stop-opacity="0"/>
+      <stop offset="95%" stop-color="#ec4899" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#fbbf24" stop-opacity="0.5"/>
+    </radialGradient>
+
+    <!-- Gradient for music note -->
+    <linearGradient id="noteGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#fef08a"/>
     </linearGradient>
-    <linearGradient id="grad2" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#c084fc;stop-opacity:1" />
-      <stop offset="100%" style="stop-color:#f472b6;stop-opacity:1" />
-    </linearGradient>
+
+    <!-- Drop shadow filter -->
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#000" flood-opacity="0.4"/>
+    </filter>
+
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="2.5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
   </defs>
-  
-  <!-- Background circle -->
-  <circle cx="50" cy="50" r="48" fill="url(#grad1)" />
-  
-  <!-- Inner glow -->
-  <circle cx="50" cy="50" r="40" fill="url(#grad2)" opacity="0.5" />
-  
-  <!-- Music note -->
-  <g fill="white" transform="translate(32, 25)">
-    <!-- Note head -->
-    <ellipse cx="18" cy="45" rx="10" ry="8" transform="rotate(-20, 18, 45)" />
-    
+
+  <!-- Outer decorative ring (animated pulse) -->
+  <circle cx="50" cy="50" r="48" fill="none" stroke="url(#outerRing)" stroke-width="3" class="bg-pulse"/>
+
+  <!-- Main background circle -->
+  <circle cx="50" cy="50" r="45" fill="url(#bgGrad)" filter="url(#shadow)"/>
+
+  <!-- Inner soft glow -->
+  <circle cx="50" cy="50" r="42" fill="url(#innerGlow)"/>
+
+  <!-- Decorative tiny stars / particles (rotating) -->
+  <g class="spin-star" fill="#fef08a" opacity="0.7">
+    <circle cx="50" cy="12" r="1.5"/>
+    <circle cx="50" cy="88" r="1.5"/>
+    <circle cx="12" cy="50" r="1.5"/>
+    <circle cx="88" cy="50" r="1.5"/>
+    <circle cx="22" cy="22" r="1"/>
+    <circle cx="78" cy="78" r="1"/>
+    <circle cx="22" cy="78" r="1"/>
+    <circle cx="78" cy="22" r="1"/>
+  </g>
+
+  <!-- == RADIO WAVES (animated) == -->
+  <g stroke="#fef08a" fill="none" stroke-linecap="round" filter="url(#glow)">
+    <!-- Wave 1 (inner) -->
+    <path d="M72 28 Q80 35 72 42" stroke-width="2.2" class="wave-1"/>
+    <!-- Wave 2 (outer) -->
+    <path d="M76 22 Q88 32 76 48" stroke-width="1.8" class="wave-2"/>
+  </g>
+
+  <!-- == MUSIC NOTE == -->
+  <g transform="translate(28, 22)" filter="url(#shadow)">
+    <!-- Note head (elegant, slightly larger) -->
+    <ellipse cx="20" cy="48" rx="11" ry="8.5" transform="rotate(-22, 20, 48)" fill="url(#noteGrad)"/>
     <!-- Note stem -->
-    <rect x="26" y="10" width="4" height="38" rx="2" />
-    
-    <!-- Note flag -->
-    <path d="M30 10 Q45 20 35 35" stroke="white" stroke-width="4" fill="none" stroke-linecap="round" />
+    <rect x="28" y="8" width="4.5" height="42" rx="2" fill="url(#noteGrad)"/>
+    <!-- Flag (more graceful curve) -->
+    <path d="M32 8 Q48 18 42 36 Q46 22 36 14" fill="url(#noteGrad)" stroke="none"/>
+    <!-- Secondary flag (for double note effect) -->
+    <path d="M32 20 Q45 28 40 45 Q44 32 36 25" fill="url(#noteGrad)" opacity="0.8"/>
   </g>
-  
-  <!-- Play triangle overlay -->
-  <polygon points="60,35 60,65 80,50" fill="white" fill-opacity="0.3" />
-  
-  <!-- Radio waves -->
-  <g stroke="white" stroke-width="2" fill="none" stroke-linecap="round" opacity="0.6">
-    <path d="M70 25 Q78 30 70 35" />
-    <path d="M73 20 Q85 28 73 40" />
+
+  <!-- == PLAY TRIANGLE (modern, semi‑transparent overlay) == -->
+  <g filter="url(#glow)">
+    <polygon points="60,38 60,62 78,50" fill="#ffffff" fill-opacity="0.35" stroke="#ffffff" stroke-width="0.5"/>
   </g>
+
+  <!-- Small accent dot (bindi / decorative element) -->
+  <circle cx="50" cy="50" r="2" fill="#fef08a" opacity="0.9" filter="url(#glow)"/>
 </svg>
