@@ -1,0 +1,6 @@
+# Cloudflare Pages / Netlify redirect rules
+# privacy.html is a static page - serve it directly
+/privacy.html  /privacy.html  200
+
+# SPA fallback - all other routes go to index.html
+/*  /index.html  200

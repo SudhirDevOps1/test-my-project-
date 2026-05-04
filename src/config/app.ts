@@ -5,3 +5,5 @@ export const APP_AUTHOR = 'Sudhir Kumar';
 export const APP_REPO_URL = 'https://github.com/wherewhere/PrivMITLab-Music-Radio';
 export const APP_AUTHOR_URL = 'https://github.com/wherewhere';
 export const APP_COPYRIGHT = '2026';
+export const APP_DEMO_URL = 'https://music-player-stream-unlimited-music.vercel.app/';
+export const APP_PRIVACY_URL = '/privacy.html';

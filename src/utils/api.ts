@@ -1,7 +1,7 @@
 import type { Song, SearchProvider } from '@/types';
 
 // ─── Cache ──────────────────────────────────────────────────────────────────
-const CACHE_DURATION = 24 * 60 * 60 * 1000;
+const CACHE_DURATION = 24 * 60 * 60 * 1000; // 24 hours
 
 interface CachedResult {
     data: Song[];
@@ -10,7 +10,7 @@ interface CachedResult {
 }
 
 function getCacheKey(query: string): string {
-    return `music_search_v7_${query.toLowerCase().trim().replace(/\s+/g, '_')}`;
+    return `music_search_${query.toLowerCase().trim().replace(/\s+/g, '_')}`;
 }
 
 function getCachedResult(query: string): Song[] | null {
@@ -84,18 +84,18 @@ function sortInstancesByHealth(instances: string[], type: 'piped' | 'invidious')
 
 // ─── Network ────────────────────────────────────────────────────────────────
 async function fetchWithTimeout(url: string, timeout = 10000): Promise<Response> {
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), timeout);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
     try {
-        const res = await fetch(url, {
-            signal: ac.signal,
-            headers: { Accept: 'application/json' },
+        const response = await fetch(url, { 
+            signal: controller.signal,
+            headers: { 'Accept': 'application/json' },
         });
-        clearTimeout(timer);
-        return res;
-    } catch (e) {
-        clearTimeout(timer);
-        throw e;
+        clearTimeout(timeoutId);
+        return response;
+    } catch (error) {
+        clearTimeout(timeoutId);
+        throw error;
     }
 }
 
@@ -110,127 +110,169 @@ function cleanTitle(raw: string): string {
         .trim();
 }
 
-// helpers kept for backwards compat (used via extractVideoId inline in searchPiped)
+function extractVideoId(item: { id?: string; url?: string; videoId?: string }): string {
+    let vid = item.videoId || item.id || '';
+    if (!vid && item.url) {
+        const match = item.url.match(/[?&]v=([^&]+)/) || item.url.match(/\/([a-zA-Z0-9_-]{11})$/);
+        vid = match ? match[1] : '';
+    }
+    return vid.replace(/^\/watch\?v=/, '').trim();
+}
 
 // ─── Piped ──────────────────────────────────────────────────────────────────
-// Piped is the 2nd-priority provider (Invidious is first by default)
+// Updated 2026 - CDN-backed instances first for speed
 const PIPED_INSTANCES = [
-    'https://pipedapi.adminforge.de',
-    'https://pipedapi.kavin.rocks',
-    'https://pipedapi.r4fo.com',
-    'https://api.piped.yt',
-    'https://pipedapi.astre.me',
-    'https://pipedapi.projectsegfau.lt',
-    'https://piped-api.garudalinux.org',
-    'https://pipedapi.mosesm.org',
-    'https://pipedapi.rivo.world',
-    'https://pipedapi.tokhmi.xyz',
+    'https://pipedapi.kavin.rocks',        // Official - US/IN/NL/CA/GB/FR CDN
+    'https://pipedapi.syncpundit.io',      // US/IN/GB/JP CDN
+    'https://pipedapi.tokhmi.xyz',         // US CDN
+    'https://pipedapi.moomoo.me',          // GB CDN
+    'https://piped-api.garudalinux.org',   // FI CDN
+    'https://api-piped.mha.fi',            // FI
+    'https://pipedapi.rivo.lol',           // CL
+    'https://pipedapi.leptons.xyz',        // AT
+    'https://piped-api.lunar.icu',         // DE
+    'https://pipedapi.colinslegacy.com',   // US
+    'https://pipedapi.r4fo.com',           // DE
+    'https://pipedapi.adminforge.de',      // DE
+    'https://yapi.vyper.me',               // CL
+    'https://api.looleh.xyz',              // NL
+    'https://piped-api.cfe.re',            // PL
+    'https://pipedapi.projectsegfau.lt',   // US
+    'https://api.piped.yt',               // fallback
 ];
 
+function parsePipedItem(item: any): Song | null {
+    const videoId = extractVideoId(item);
+    if (!videoId || videoId.length < 4) return null;
+    return {
+        videoId,
+        title: cleanTitle(item.title || 'Unknown'),
+        artist: cleanTitle(item.uploaderName || item.uploader || 'Unknown Artist'),
+        thumbnail: item.thumbnail || `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`,
+        duration: typeof item.duration === 'number' ? item.duration : 0,
+    };
+}
+
+async function tryPipedInstance(instance: string, query: string): Promise<Song[]> {
+    const url = `${instance}/search?q=${encodeURIComponent(query)}&filter=videos`;
+    const response = await fetchWithTimeout(url, 8000);
+    if (!response.ok) {
+        recordFail('piped', instance);
+        return [];
+    }
+    const data = await response.json();
+    if (!data.items || !Array.isArray(data.items) || data.items.length === 0) return [];
+
+    const songs: Song[] = data.items
+        .filter((item: any) => item.url || item.id)
+        .slice(0, 20)
+        .map((item: any) => parsePipedItem(item))
+        .filter((s: Song | null): s is Song => s !== null);
+
+    if (songs.length > 0) recordSuccess('piped', instance);
+    return songs;
+}
+
 async function searchPiped(query: string): Promise<Song[]> {
-    // Use reference project's proven sequential approach
     const sorted = sortInstancesByHealth(PIPED_INSTANCES, 'piped');
 
-    for (const instance of sorted) {
+    // Race top 3 in parallel for speed
+    const top3 = sorted.slice(0, 3);
+    const raceResult = await Promise.race([
+        ...top3.map(inst =>
+            tryPipedInstance(inst, query).then(songs => songs.length > 0 ? songs : null).catch(() => null)
+        ),
+        new Promise<null>(resolve => setTimeout(() => resolve(null), 4000)),
+    ]);
+    if (raceResult) return raceResult;
+
+    // Sequential fallback for remaining instances
+    for (const instance of sorted.slice(3)) {
         try {
-            const url = `${instance}/search?q=${encodeURIComponent(query)}&filter=videos`;
-            const res = await fetchWithTimeout(url, 10000);
-            if (!res.ok) {
-                recordFail('piped', instance);
-                continue;
-            }
-            const data = await res.json();
-            if (!data.items || !Array.isArray(data.items) || data.items.length === 0) continue;
-
-            const songs: Song[] = data.items
-                .filter((i: any) => i.url || i.id || i.videoId)
-                .slice(0, 20)
-                .map((i: any): Song => {
-                    // Extract videoId - reference project's approach
-                    let videoId = i.id || '';
-                    if (!videoId && i.url) {
-                        const match = i.url.match(/[?&]v=([^&]+)/);
-                        videoId = match ? match[1] : i.url.split('/').pop() || '';
-                    }
-                    videoId = videoId.replace(/^\/watch\?v=/, '').trim();
-                    return {
-                        videoId,
-                        title: cleanTitle(i.title),
-                        artist: cleanTitle(i.uploaderName || i.uploader || 'Unknown Artist'),
-                        thumbnail: i.thumbnail || `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`,
-                        duration: typeof i.duration === 'number' ? i.duration : 0,
-                    };
-                })
-                .filter((s: Song) => s.videoId && s.videoId.length > 3);
-
-            if (songs.length > 0) {
-                recordSuccess('piped', instance);
-                return songs;
-            }
-        } catch (e) {
+            const songs = await tryPipedInstance(instance, query);
+            if (songs.length > 0) return songs;
+        } catch {
             recordFail('piped', instance);
-            continue;
         }
     }
     return [];
 }
 
 // ─── Invidious ──────────────────────────────────────────────────────────────
-// Invidious works well on both PC and mobile - put most reliable ones first
+// Updated 2026 - Official Invidious project trusted list first
 const INVIDIOUS_INSTANCES = [
-    'https://iv.melmac.space',
-    'https://inv.nadeko.net',
-    'https://iv.ggtyler.dev',
-    'https://invidious.privacyredirect.com',
+    'https://iv.melmac.space',              // DE - fast
+    'https://inv.nadeko.net',               // CL - multiple backends (inv1-inv9)
+    'https://inv.tux.pizza',               // US
+    'https://yt.artemislena.eu',            // DE - official list
+    'https://invidious.flokinet.to',        // RO - official list
+    'https://invidious.privacydev.net',     // FR - official list
+    'https://iv.datura.network',            // FI - official list
+    'https://invidious.fdn.fr',             // FR - official list
+    'https://invidious.protokolla.fi',      // FI - official list
+    'https://invidious.private.coffee',     // AT - official list
+    'https://yt.drgnz.club',               // CZ - official list
+    'https://invidious.perennialte.ch',     // AU - official list
+    'https://invidious.drgns.space',        // US - official list
+    'https://inv.us.projectsegfau.lt',      // US - official list
+    'https://invidious.jing.rocks',         // JP - official list
+    'https://yewtu.be',                     // DE - oldest instance
     'https://invidious.nerdvpn.de',
-    'https://inv.tux.pizza',
-    'https://yt.artemislena.eu',
-    'https://invidious.perennialte.ch',
     'https://invidious.protokoll-11.de',
-    'https://invidious.fdn.fr',
     'https://invidious.slipfox.xyz',
-    'https://invidious.io',
 ];
 
+async function tryInvidiousInstance(instance: string, query: string): Promise<Song[]> {
+    const url = `${instance}/api/v1/search?q=${encodeURIComponent(query)}&type=video`;
+    const response = await fetchWithTimeout(url, 8000);
+    if (!response.ok) {
+        recordFail('invidious', instance);
+        return [];
+    }
+    const data = await response.json();
+    if (!Array.isArray(data) || data.length === 0) return [];
+
+    const songs: Song[] = data
+        .filter((item: any) => item.videoId && item.title)
+        .slice(0, 20)
+        .map((item: any): Song => {
+            const thumb =
+                item.videoThumbnails?.find((t: any) => t.quality === 'medium')?.url ||
+                item.videoThumbnails?.[0]?.url ||
+                `https://i.ytimg.com/vi/${item.videoId}/mqdefault.jpg`;
+            return {
+                videoId: item.videoId,
+                title: cleanTitle(item.title),
+                artist: cleanTitle(item.author || 'Unknown Artist'),
+                thumbnail: thumb.startsWith('//') ? `https:${thumb}` : thumb,
+                duration: typeof item.lengthSeconds === 'number' ? item.lengthSeconds : 0,
+            };
+        });
+
+    if (songs.length > 0) recordSuccess('invidious', instance);
+    return songs;
+}
+
 async function searchInvidious(query: string): Promise<Song[]> {
-    // Use reference project's proven sequential approach - each instance tried in order
     const sorted = sortInstancesByHealth(INVIDIOUS_INSTANCES, 'invidious');
 
-    for (const instance of sorted) {
+    // Race top 3 in parallel for speed (same approach as reference app)
+    const top3 = sorted.slice(0, 3);
+    const raceResult = await Promise.race([
+        ...top3.map(inst =>
+            tryInvidiousInstance(inst, query).then(songs => songs.length > 0 ? songs : null).catch(() => null)
+        ),
+        new Promise<null>(resolve => setTimeout(() => resolve(null), 4000)),
+    ]);
+    if (raceResult) return raceResult;
+
+    // Sequential fallback for remaining instances
+    for (const instance of sorted.slice(3)) {
         try {
-            const url = `${instance}/api/v1/search?q=${encodeURIComponent(query)}&type=video`;
-            const res = await fetchWithTimeout(url, 10000);
-            if (!res.ok) {
-                recordFail('invidious', instance);
-                continue;
-            }
-            const data = await res.json();
-            if (!Array.isArray(data) || data.length === 0) continue;
-
-            const songs: Song[] = data
-                .filter((i: any) => i.videoId && i.title)
-                .slice(0, 20)
-                .map((i: any): Song => {
-                    const thumb =
-                        i.videoThumbnails?.find((t: any) => t.quality === 'medium')?.url ||
-                        i.videoThumbnails?.[0]?.url ||
-                        `https://i.ytimg.com/vi/${i.videoId}/mqdefault.jpg`;
-                    return {
-                        videoId: i.videoId,
-                        title: cleanTitle(i.title),
-                        artist: cleanTitle(i.author || 'Unknown Artist'),
-                        thumbnail: thumb.startsWith('//') ? `https:${thumb}` : thumb,
-                        duration: typeof i.lengthSeconds === 'number' ? i.lengthSeconds : 0,
-                    };
-                });
-
-            if (songs.length > 0) {
-                recordSuccess('invidious', instance);
-                return songs;
-            }
-        } catch (e) {
+            const songs = await tryInvidiousInstance(instance, query);
+            if (songs.length > 0) return songs;
+        } catch {
             recordFail('invidious', instance);
-            continue;
         }
     }
     return [];
@@ -244,7 +286,6 @@ async function searchYouTube(query: string, apiKey: string): Promise<Song[]> {
         url.searchParams.set('part', 'snippet');
         url.searchParams.set('q', query);
         url.searchParams.set('type', 'video');
-        url.searchParams.set('videoCategoryId', '10');
         url.searchParams.set('maxResults', '20');
         url.searchParams.set('key', apiKey);
 
@@ -277,9 +318,9 @@ async function searchYouTube(query: string, apiKey: string): Promise<Song[]> {
 // ─── Streams ────────────────────────────────────────────────────────────────
 export async function getStreamUrl(videoId: string): Promise<{ audioUrl: string; videoUrl?: string }> {
     const sorted = sortInstancesByHealth(PIPED_INSTANCES, 'piped');
-    for (const base of sorted) {
+    for (const instance of sorted) {
         try {
-            const res = await fetchWithTimeout(`${base}/streams/${videoId}`, 8000);
+            const res = await fetchWithTimeout(`${instance}/streams/${videoId}`, 8000);
             if (!res.ok) continue;
             const data = await res.json();
 
@@ -288,11 +329,11 @@ export async function getStreamUrl(videoId: string): Promise<{ audioUrl: string;
 
             const audioUrl = audioStream?.url || data.hls || '';
             if (audioUrl || videoStream?.url) {
-                recordSuccess('piped', base);
+                recordSuccess('piped', instance);
                 return { audioUrl, videoUrl: videoStream?.url || data.hls };
             }
         } catch {
-            recordFail('piped', base);
+            recordFail('piped', instance);
         }
     }
     throw new Error('All stream instances failed');
@@ -301,9 +342,9 @@ export async function getStreamUrl(videoId: string): Promise<{ audioUrl: string;
 // ─── Main search export ────────────────────────────────────────────────────
 export async function searchSongs(
     query: string,
-    provider: SearchProvider = 'piped',
+    preferredProvider: SearchProvider = 'invidious',
     apiKey = '',
-): Promise<{ songs: Song[]; provider: SearchProvider | 'cache' | 'failed' | 'none' }> {
+): Promise<{ songs: Song[]; provider: string }> {
     if (!query?.trim()) return { songs: [], provider: 'none' };
 
     const q = query.trim();
@@ -314,53 +355,55 @@ export async function searchSongs(
         return { songs: cached, provider: 'cache' };
     }
 
-    // Build provider order - Invidious first by default (works better on PC & mobile)
-    const order: { name: SearchProvider; fn: () => Promise<Song[]> }[] = [];
+    let songs: Song[] = [];
+    let usedProvider: string = preferredProvider;
 
-    if (provider === 'youtube' && apiKey) {
-        // YouTube API selected explicitly
-        order.push({ name: 'youtube', fn: () => searchYouTube(q, apiKey) });
-        order.push({ name: 'invidious', fn: () => searchInvidious(q) });
-        order.push({ name: 'piped', fn: () => searchPiped(q) });
-    } else if (provider === 'piped') {
-        // Piped selected explicitly
-        order.push({ name: 'piped', fn: () => searchPiped(q) });
-        order.push({ name: 'invidious', fn: () => searchInvidious(q) });
+    // Try preferred provider first, then fallbacks
+    const providers: Array<{ name: string; fn: () => Promise<Song[]> }> = [];
+
+    if (preferredProvider === 'piped') {
+        providers.push({ name: 'piped', fn: () => searchPiped(q) });
+        providers.push({ name: 'invidious', fn: () => searchInvidious(q) });
+    } else if (preferredProvider === 'invidious') {
+        providers.push({ name: 'invidious', fn: () => searchInvidious(q) });
+        providers.push({ name: 'piped', fn: () => searchPiped(q) });
+    } else if (preferredProvider === 'youtube' && apiKey) {
+        providers.push({ name: 'youtube', fn: () => searchYouTube(q, apiKey) });
+        providers.push({ name: 'invidious', fn: () => searchInvidious(q) });
+        providers.push({ name: 'piped', fn: () => searchPiped(q) });
     } else {
-        // Default (invidious) or explicit invidious selection
-        // Invidious first - works on both PC and mobile reliably
-        order.push({ name: 'invidious', fn: () => searchInvidious(q) });
-        order.push({ name: 'piped', fn: () => searchPiped(q) });
+        // Default: Invidious first (works on PC & mobile)
+        providers.push({ name: 'invidious', fn: () => searchInvidious(q) });
+        providers.push({ name: 'piped', fn: () => searchPiped(q) });
     }
 
-    // YouTube API always as final fallback if key is set
-    if (apiKey && provider !== 'youtube') {
-        order.push({ name: 'youtube', fn: () => searchYouTube(q, apiKey) });
+    // Always append YouTube if key available and not already first
+    if (apiKey && preferredProvider !== 'youtube') {
+        providers.push({ name: 'youtube', fn: () => searchYouTube(q, apiKey) });
     }
 
-    for (const p of order) {
+    for (const provider of providers) {
         try {
-            const songs = await p.fn();
+            songs = await provider.fn();
             if (songs.length > 0) {
-                cacheResult(q, songs, p.name);
-                return { songs, provider: p.name };
+                usedProvider = provider.name;
+                cacheResult(q, songs, usedProvider);
+                return { songs, provider: usedProvider };
             }
-        } catch (e) {
-            console.error(`[${p.name}] error:`, e);
+        } catch (error) {
+            console.error(`${provider.name} failed:`, error);
+            continue;
         }
     }
 
-    // All APIs failed - return empty (no fake results)
+    console.warn('No results found for:', q);
     return { songs: [], provider: 'failed' };
 }
 
 export function clearSearchCache(): void {
-    const keys = Object.keys(localStorage);
-    for (let i = 0; i < keys.length; i++) {
-        if (keys[i].startsWith('music_search_') || keys[i] === 'music_instance_health') {
-            localStorage.removeItem(keys[i]);
-        }
-    }
+    Object.keys(localStorage)
+        .filter(k => k.startsWith('music_search_'))
+        .forEach(k => localStorage.removeItem(k));
 }
 
 // ─── YouTube API Key Validator ──────────────────────────────────────────────
