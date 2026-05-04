@@ -2,6 +2,7 @@ const CACHE_NAME = 'privmitlab-v1';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
+  '/privacy.html',
   '/manifest.json',
   '/favicon.svg'
 ];
